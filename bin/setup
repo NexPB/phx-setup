@@ -1,0 +1,183 @@
+#!/bin/bash
+
+sudo --validate
+
+# Log file
+LOG_FILE_TIMESTAMP=$(date +%s)
+LOG_FILE="/tmp/phx-setup-$LOG_FILE_TIMESTAMP"
+
+# Colors
+COLOR_RED='\e[0;31m'
+COLOR_GREEN='\e[0;32m'
+COLOR_CYAN='\e[0;36m'
+COLOR_NONE='\e[0m'
+
+# Print a status message to the console, default color $COLOR_GREEN
+#
+# Usage:
+# ```
+# print_status "Hi"
+# print_status "Hi" $COLOR
+# ```
+print_status() {
+    local color=${2:-$COLOR_GREEN}
+
+    echo -en "$color$1${COLOR_NONE}"
+}
+
+# Display a spinner for the give background job.
+#
+# Usage:
+# ```
+# (sudo apt-get install -y git) & spinner
+#
+# (sudo apt-get install -y git) & PID=$!
+# spinner $PID
+# ```
+spinner() {
+    local pid=${1:-$!}
+    local spin='-\|/'
+
+    i=0
+    while kill -0 $pid 2>/dev/null
+    do
+        i=$(( (i+1) %4 ))
+        printf "\r${spin:$i:1}"
+        sleep .25
+    done
+
+    printf "\r"
+}
+
+# Lists the installed version(s) for the given language.
+#
+# Usage:
+# ```
+# asdf_installed "nodejs"
+# ```
+asdf_installed() {
+    asdf list $1
+}
+
+# Check if the given language and version have been installed.
+#
+# Usage:
+# ```
+# asdf_exists "nodejs" "14.15.3"
+# ```
+asdf_exists() {
+    local LANG=$1
+    local VERSION=$2
+    local INSTALLED_VERSIONS=$(asdf_installed $LANG)
+
+    [[ $INSTALLED_VERSIONS =~ "${VERSION}" ]]
+}
+
+print_status "Log file: $LOG_FILE \n"
+
+# Verify asdf
+print_status "Verifying asdf installation...\n"
+if ! [[ -e $HOME/.asdf/asdf.sh ]]; then
+    print_status "User: $USER - Please install asdf to continue: \`https://asdf-vm.com/#/core-manage-asdf?id=install\`\n" $COLOR_RED
+    exit 1
+fi
+
+print_status "Running apt update...\n"
+sudo apt-get update
+
+# Install curl, git and unzip
+print_status "Installing curl, git and unzip...\n"
+(sudo apt-get install -y curl git unzip 2>&1 >> $LOG_FILE) & spinner
+
+curl --version 2>&1 | head -n 1
+git --version 2>&1 | head -n 1
+unzip -v 2>&1 | head -n 1
+
+# Install postgres
+HAS_PSQL=`command -v psql`
+if [[ -x $HAS_PSQL ]]; then
+    print_status "Postgresql already exists: " $COLOR_CYAN
+    psql -V
+else
+    print_status "Installing postgresql...\n"
+    (sudo apt-get install -y postgresql postgresql-contrib 2>&1 >> $LOG_FILE) & spinner
+fi
+
+# Install redis
+HAS_REDIS=`command -v redis-cli`
+if [[ -x $HAS_REDIS ]]; then
+    print_status "Redis already exists: " $COLOR_CYAN
+    redis-cli -v
+else
+    print_status "Installing redis...\n"
+    (sudo apt-get install -y redis-server 2>&1 >> $LOG_FILE) & spinner
+fi
+
+print_status "Found asdf: " $COLOR_CYAN
+asdf 2>&1 | head -n 1
+
+# Install Erlang
+ERLANG_VERSION="23.2"
+print_status "Erlang ($ERLANG_VERSION)...\n"
+
+if ! asdf_exists "erlang" $ERLANG_VERSION; then
+    print_status "Adding asdf Erlang plugin\n"
+    ADD_ASDF_ERLANG_PLUGIN=`asdf plugin-add erlang https://github.com/asdf-vm/asdf-erlang.git 2>&1 >> $LOG_FILE` & spinner
+
+    print_status "Installing required Erlang build packages\n"
+    ERLANG_INSTALL_REQ_PKG=`sudo apt-get install -y build-essential autoconf m4 libssh-dev 2>&1 >> $LOG_FILE` & spinner
+
+    print_status "Installing Erlang ($ERLANG_VERSION)\n"
+    export KERL_CONFIGURE_OPTIONS="--disable-debug --without-javac"
+    ERLANG_INSTALL=`asdf install erlang $ERLANG_VERSION 2>&1 >> $LOG_FILE` & spinner
+fi
+
+print_status "Erlang versions installed: " $COLOR_CYAN
+asdf_installed "erlang"
+
+# Install Elixir
+ELIXIR_VERSION="1.11.4-otp-23"
+print_status "Elixir ($ELIXIR_VERSION)...\n"
+
+if ! asdf_exists "elixir" $ELIXIR_VERSION; then
+    print_status "Adding asdf Elixir plugin\n"
+    ADD_ASDF_ELIXIR_PLUGIN=`asdf plugin-add elixir https://github.com/asdf-vm/asdf-elixir.git 2>&1 >> $LOG_FILE` & spinner
+
+    print_status "Installing Elixir ($ELIXIR_VERSION)\n"
+    ELIXIR_INSTALL=`asdf install elixir $ELIXIR_VERSION 2>&1 >> $LOG_FILE` & spinner
+fi
+
+print_status "Elixir versions installed: " $COLOR_CYAN
+asdf_installed "elixir"
+
+# Install nodejs
+NODEJS_VERSION="14.15.3"
+print_status "Nodejs ($NODEJS_VERSION)...\n"
+
+if ! asdf_exists "nodejs" $NODEJS_VERSION; then
+    print_status "Adding asdf Nodejs plugin\n"
+    ADD_ASDF_NODEJS_PLUGIN=`asdf plugin-add nodejs https://github.com/asdf-vm/asdf-nodejs.git 2>&1 >> $LOG_FILE` & spinner
+
+    print_status "Import Nodejs OpenPGP keys\n"
+    NODEJS_IMPORT_OPGP_KEYS=`${ASDF_DATA_DIR:=$HOME/.asdf}/plugins/nodejs/bin/import-release-team-keyring 2>&1 >> $LOG_FILE` & spinner
+
+    print_status "Installing Nodejs ($NODEJS_VERSION)\n"
+    NODEJS_INSTALL=`asdf install nodejs $NODEJS_VERSION 2>&1 >> $LOG_FILE` & spinner
+fi
+
+print_status "Nodejs versions installed: " $COLOR_CYAN
+asdf_installed "nodejs"
+
+# Install hex
+HAS_HEX=`command -v mix hex.info`
+if [[ -x $HAS_HEX ]]; then
+    print_status "Hex already installed: " $COLOR_CYAN
+    mix hex.info 2>&1 | head -n 1
+else
+  print_status "Installing hex (Elixir package manager)\n"
+  (mix local.hex --force 2>&1 >> $LOG_FILE) & spinner
+  mix hex.info 2>&1 | head -n 1
+fi
+
+# Install phoenix-installer
+mix archive.install hex phx_new 1.5.8
